@@ -12,8 +12,10 @@
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl_ros/point_cloud.h>
+#include <pcl_ros/transforms.h>
 #include <ros/ros.h>
 #include <stdint.h>
+#include <tf/transform_listener.h>
 
 #include <fstream>
 #include <iostream>
@@ -27,7 +29,8 @@ using namespace std;
 using namespace lio_sam;
 
 /* 全局变量 */
-PointCloud::Ptr cloud_filterd;
+PointCloud::Ptr cloud_filterd(new PointCloud);
+PointCloud::Ptr world_cloud;
 PointCloud::Ptr key_frame_cloud(new PointCloud);
 PointCloud::Ptr key_frame_poses(new PointCloud);
 
@@ -40,8 +43,9 @@ double m_groundFilterPlaneDistance = 0.07;
 double m_groundFilterAngle = 0.15;
 
 ros::Publisher pub_map_;
-ros::Publisher pub_filtered_points_;
+ros::Publisher pub_points_;
 std::string mapFrame = "map";
+std::string worldFrameId = "map";
 
 template <typename T>
 void operator+=(std::vector<T> &v1, const std::vector<T> &v2) {
@@ -278,13 +282,15 @@ void filter_cloud(PointCloud::Ptr &input_cloud) {
     if (m_filterGroundPlane)
         filterGroundPlane(cloud_temp, pc_ground, pc_nonground);
 
-    /*发布点云信息*/
     cloud_filterd = pc_nonground;
+}
+
+void pub_cloud(PointCloud::Ptr &input_cloud, std::string frameId) {
     sensor_msgs::PointCloud2 pub_pc;
-    pcl::toROSMsg(*cloud_filterd, pub_pc);
-    pub_pc.header.frame_id = cloud_filterd->header.frame_id;
+    pcl::toROSMsg(*input_cloud, pub_pc);
+    pub_pc.header.frame_id = frameId;
     pub_pc.header.stamp = ros::Time::now();
-    pub_filtered_points_.publish(pub_pc);
+    pub_points_.publish(pub_pc);
 }
 
 void callback(const lio_sam::cloud_infoConstPtr &msg) {
@@ -293,7 +299,26 @@ void callback(const lio_sam::cloud_infoConstPtr &msg) {
     pcl::fromROSMsg(msg->key_frame_poses, *key_frame_poses);
     key_frame_cloud->header.seq = msg->header.seq;
     key_frame_poses->header.seq = msg->header.seq;
+    std::string baseFrameId = key_frame_cloud->header.frame_id;
+
     filter_cloud(key_frame_cloud);
+
+    /*点云转成全局坐标系*/
+    // tf::StampedTransform baseToWorldTf, worldToBaseTf;
+    // tf::TransformListener tfListener;
+
+    // try {
+    //     tfListener.waitForTransform(worldFrameId, baseFrameId, msg->key_frame_cloud.header.stamp, ros::Duration(0.2));
+    //     tfListener.lookupTransform(worldFrameId, baseFrameId, msg->key_frame_cloud.header.stamp, baseToWorldTf);
+    // } catch (tf::TransformException &ex) {
+    //     ROS_DEBUG_STREAM("Transform error of baseToWorldTf: " << ex.what() << ", quitting callback");
+    // }
+
+    // Eigen::Matrix4f baseToWorld;
+    // pcl_ros::transformAsMatrix(baseToWorldTf, baseToWorld);
+    // pcl::transformPointCloud(*cloud_filterd, *cloud_filterd, baseToWorld);
+
+    pub_cloud(cloud_filterd, baseFrameId);
 
     /*计算点云的最大和最小值*/
     double xMax = 0, yMax = 0, xMin = 0, yMin = 0;
@@ -305,7 +330,7 @@ void callback(const lio_sam::cloud_infoConstPtr &msg) {
     cout << "地图大小：" << xCells << " " << yCells << endl;
 
     GridMap current_map;
-    current_map.SetMap(xCells, yCells, 0.0, yMin, cellResolution, key_frame_cloud->header.frame_id);
+    current_map.SetMap(xCells, yCells, 0.0, yMin, cellResolution, baseFrameId);
     current_map.cloud_to_grid(*cloud_filterd);
     pub_gridmsg(current_map);
 
@@ -332,7 +357,7 @@ int main(int argc, char **argv) {
 
     pub_map_ = nh.advertise<nav_msgs::OccupancyGrid>(pubmapTopic, 1, true);
     ros::Subscriber sub = nh.subscribe<lio_sam::cloud_info>("/lio_sam/mapping/slam_info", 1, callback);
-    pub_filtered_points_ = nh.advertise<sensor_msgs::PointCloud2>("/filtered_points", 10);
+    pub_points_ = nh.advertise<sensor_msgs::PointCloud2>("/filtered_points", 10);
 
     ros::spin();
     return 0;
