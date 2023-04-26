@@ -30,7 +30,7 @@ using namespace lio_sam;
 
 /* 全局变量 */
 PointCloud::Ptr cloud_filterd(new PointCloud);
-PointCloud::Ptr world_cloud;
+PointCloud::Ptr world_cloud(new PointCloud);
 PointCloud::Ptr key_frame_cloud(new PointCloud);
 PointCloud::Ptr key_frame_poses(new PointCloud);
 
@@ -46,6 +46,7 @@ ros::Publisher pub_map_;
 ros::Publisher pub_points_;
 std::string mapFrame = "map";
 std::string worldFrameId = "map";
+tf::TransformListener *tfListener;
 
 template <typename T>
 void operator+=(std::vector<T> &v1, const std::vector<T> &v2) {
@@ -167,9 +168,9 @@ void pub_gridmsg(GridMap map) {
     ROS_INFO_STREAM("发布栅格地图");
 }
 
-void calcSize(double *xMax, double *yMax, double *xMin, double *yMin) {
+void calcSize(PointCloud::Ptr &input_cloud, double *xMax, double *yMax, double *xMin, double *yMin) {
     pcl::PointXYZ minPt, maxPt;
-    pcl::getMinMax3D(*cloud_filterd, minPt, maxPt);
+    pcl::getMinMax3D(*input_cloud, minPt, maxPt);
     *xMax = maxPt.x;
     *yMax = maxPt.y;
     *xMin = minPt.x;
@@ -304,32 +305,29 @@ void callback(const lio_sam::cloud_infoConstPtr &msg) {
     filter_cloud(key_frame_cloud);
 
     /*点云转成全局坐标系*/
-    // tf::StampedTransform baseToWorldTf, worldToBaseTf;
-    // tf::TransformListener tfListener;
+    tf::StampedTransform baseToWorldTf, worldToBaseTf;
 
-    // try {
-    //     tfListener.waitForTransform(worldFrameId, baseFrameId, msg->key_frame_cloud.header.stamp, ros::Duration(0.2));
-    //     tfListener.lookupTransform(worldFrameId, baseFrameId, msg->key_frame_cloud.header.stamp, baseToWorldTf);
-    // } catch (tf::TransformException &ex) {
-    //     ROS_DEBUG_STREAM("Transform error of baseToWorldTf: " << ex.what() << ", quitting callback");
-    // }
+    try {
+        tfListener->waitForTransform(worldFrameId, baseFrameId, msg->key_frame_cloud.header.stamp, ros::Duration(0.2));
+        tfListener->lookupTransform(worldFrameId, baseFrameId, msg->key_frame_cloud.header.stamp, baseToWorldTf);
+    } catch (tf::TransformException &ex) {
+        ROS_DEBUG_STREAM("Transform error of baseToWorldTf: " << ex.what() << ", quitting callback");
+    }
 
-    // Eigen::Matrix4f baseToWorld;
-    // pcl_ros::transformAsMatrix(baseToWorldTf, baseToWorld);
-    // pcl::transformPointCloud(*cloud_filterd, *cloud_filterd, baseToWorld);
+    Eigen::Matrix4f baseToWorld;
+    pcl_ros::transformAsMatrix(baseToWorldTf, baseToWorld);
+    pcl::transformPointCloud(*cloud_filterd, *world_cloud, baseToWorld);
 
-    pub_cloud(cloud_filterd, baseFrameId);
+    pub_cloud(world_cloud, worldFrameId);
 
+    GridMap current_map;
     /*计算点云的最大和最小值*/
     double xMax = 0, yMax = 0, xMin = 0, yMin = 0;
-    calcSize(&xMax, &yMax, &xMin, &yMin);
-
+    calcSize(cloud_filterd,&xMax, &yMax, &xMin, &yMin);
     /* 确定栅格地图的长和宽 */
     int xCells = ((int)((xMax) / cellResolution)) + 1;
     int yCells = ((int)((yMax - yMin) / cellResolution)) + 1;
     cout << "地图大小：" << xCells << " " << yCells << endl;
-
-    GridMap current_map;
     current_map.SetMap(xCells, yCells, 0.0, yMin, cellResolution, baseFrameId);
     current_map.cloud_to_grid(*cloud_filterd);
     pub_gridmsg(current_map);
@@ -341,6 +339,7 @@ int main(int argc, char **argv) {
     setlocale(LC_ALL, "");
     ros::init(argc, argv, "convertor_node");
     ros::NodeHandle nh("~");
+    tfListener = new tf::TransformListener();
 
     std::string subTopic = "/lio_sam/mapping/slam_info";
     std::string pubmapTopic = "/liosam_2gridmap/map";
