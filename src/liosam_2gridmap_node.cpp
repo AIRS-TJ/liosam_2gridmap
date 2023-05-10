@@ -28,7 +28,7 @@ typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
 using namespace std;
 using namespace lio_sam;
 
-/* 全局变量 */
+/* global variable */
 PointCloud::Ptr cloud_filterd(new PointCloud);
 PointCloud::Ptr world_cloud(new PointCloud);
 PointCloud::Ptr key_frame_cloud(new PointCloud);
@@ -48,11 +48,6 @@ std::string mapFrame = "map";
 std::string worldFrameId = "map";
 tf::TransformListener *tfListener;
 
-template <typename T>
-void operator+=(std::vector<T> &v1, const std::vector<T> &v2) {
-    v1.insert(v1.end(), v2.begin(), v2.end());
-}
-
 class GridMap {
    public:
     double resolution_;
@@ -62,9 +57,12 @@ class GridMap {
     int size_;
     double mapOriginPosX_;
     double mapOriginPosY_;
+    double sensorOriginPosX_;
+    double sensorOriginPosY_;
     std::string mapFrameId_;
-    std::vector<signed char> Grid_;
-    // maxrange check
+    std::vector<std::vector<signed char>> Grid_;
+    int seq_;
+    // lidar maxrange set,the Pythagorean theorem to width and height
 
    public:
     GridMap() {
@@ -72,7 +70,7 @@ class GridMap {
     }
     ~GridMap() {}
     inline bool isValidGridIndex(const int &x, const int &y) const { return ((x < width_) && (y < height_) && (x >= 0) && (y >= 0)); }
-    void SetMap(int width, int height, double mapOriginPosX, double mapOriginPosY, double resolution, std::string mapFrameId) {
+    void SetMap(int width, int height, double mapOriginPosX, double mapOriginPosY, double resolution, std::string mapFrameId, double sensorOriginPosX, double sensorOriginPosY, int seq) {
         resolution_ = resolution;
         width_ = width;
         height_ = height;
@@ -80,24 +78,31 @@ class GridMap {
         mapOriginPosY_ = mapOriginPosY;
         size_ = width_ * height_;
         mapFrameId_ = mapFrameId;
-        Grid_.resize(size_, -1);
+        sensorOriginPosX_ = sensorOriginPosX;
+        sensorOriginPosY_ = sensorOriginPosY;
+        seq_ = seq;
+        Grid_.resize(width_);
+        for (int k = 0; k < width_; ++k) {
+            Grid_[k].resize(height_, -1);
+        }
     }
 
     void rayCasting(int x0, int y0, int x1, int y1);
     void cloud_to_grid(PointCloud cloud);
 };
-
+/*
+-1:unknow;100:occupied;0:free
+*/
 void GridMap::cloud_to_grid(PointCloud cloud) {
     for (const auto &p : cloud) {
         int x = (int)((p.x - mapOriginPosX_) / resolution_);
         int y = (int)((p.y - mapOriginPosY_) / resolution_);
 
-        int x0 = (int)((mapOriginPosX_) / resolution_);
-        int y0 = (int)((-mapOriginPosY_) / resolution_);
+        int x0 = (int)((sensorOriginPosX_ - mapOriginPosX_) / resolution_);
+        int y0 = (int)((sensorOriginPosY_ - mapOriginPosY_) / resolution_);
         int x1 = (int)((p.x - mapOriginPosX_) / resolution_);
         int y1 = (int)((p.y - mapOriginPosY_) / resolution_);
-
-        Grid_[y * width_ + x] = 100;  //-1:unknow;100:occupied;0:free;
+        Grid_[x][y] = 100;
         rayCasting(x0, y0, x1, y1);
     }
 }
@@ -128,9 +133,8 @@ void GridMap::rayCasting(int x0, int y0, int x1, int y1) {
     dy *= 2;
 
     for (; n > 0; --n) {
-        if (isValidGridIndex(x, y) && Grid_[y * width_ + x] != 100)
-            Grid_[y * width_ + x] = 0;
-
+        if (isValidGridIndex(x, y) && Grid_[x][y] != 100)
+            Grid_[x][y] = 0;
         if (e > 0) {
             x += sx;
             e -= dy;
@@ -141,13 +145,64 @@ void GridMap::rayCasting(int x0, int y0, int x1, int y1) {
     }
 }
 
+void operator+=(GridMap &m1, GridMap &m2) {
+    if (m1.resolution_ != m2.resolution_ && m1.resolution_ != cellResolution) {
+        ROS_ERROR("Resolution of map changed, cannot be adjusted");
+        return;
+    }
+    double xMin = std::min(m1.mapOriginPosX_, m2.mapOriginPosX_);
+    double yMin = std::min(m1.mapOriginPosY_, m2.mapOriginPosY_);
+    double xMax = std::max(m1.Grid_.size() * cellResolution + m1.mapOriginPosX_, m2.Grid_.size() * cellResolution + m2.mapOriginPosX_);
+    double yMax = std::max(m1.Grid_[0].size() * cellResolution + m1.mapOriginPosY_, m2.Grid_[0].size() * cellResolution + m2.mapOriginPosY_);
+    int width = (xMax - xMin) / cellResolution;
+    int height = (yMax - yMin) / cellResolution;
+
+    GridMap m3;
+    m3.SetMap(width, height, xMin, yMin, cellResolution, worldFrameId, 0.0, 0.0, m2.seq_);
+    int rows = 0, cols = 0, a = 0, b = 0;
+    rows = m1.Grid_.size();
+    cols = m1.Grid_[0].size();
+    a = (m1.mapOriginPosX_ - xMin) / cellResolution;
+    b = (m1.mapOriginPosY_ - yMin) / cellResolution;
+    //
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            m3.Grid_[i + a][j + b] = m1.Grid_[i][j];
+        }
+    }
+
+    rows = m2.Grid_.size();
+    cols = m2.Grid_[0].size();
+    a = (m2.mapOriginPosX_ - xMin) / cellResolution;
+    b = (m2.mapOriginPosY_ - yMin) / cellResolution;
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            if (m2.Grid_[i][j] != -1) {
+                m3.Grid_[i + a][j + b] = m2.Grid_[i][j];
+            }
+        }
+    }
+
+    m1 = m3;
+}
+
+template <typename T>
+void convertVector(std::vector<std::vector<T>> &v2, std::vector<T> &v1) {
+    int rows = v2.size();
+    int cols = v2[0].size();
+    v1.resize(rows * cols);
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            v1[j * rows + i] = v2[i][j];
+        }
+    }
+}
+
 void pub_gridmsg(GridMap map) {
-    static int seq = 0;
-    seq++;
     nav_msgs::OccupancyGridPtr grid(new nav_msgs::OccupancyGrid);
 
     grid->header.frame_id = map.mapFrameId_;
-    grid->header.seq = key_frame_cloud->header.seq;
+    grid->header.seq = map.seq_;
     grid->header.stamp.sec = ros::Time::now().sec;
     grid->header.stamp.nsec = ros::Time::now().nsec;
     grid->info.map_load_time = ros::Time::now();
@@ -162,19 +217,28 @@ void pub_gridmsg(GridMap map) {
     grid->info.origin.orientation.x = 0;
     grid->info.origin.orientation.y = 0;
     grid->info.origin.orientation.z = 0;
-    grid->data = map.Grid_;
+    std::vector<signed char> v1;
+    convertVector(map.Grid_, v1);
+    grid->data = v1;
 
     pub_map_.publish(grid);
-    ROS_INFO_STREAM("发布栅格地图");
+    ROS_INFO_STREAM("pub map");
 }
 
-void calcSize(PointCloud::Ptr &input_cloud, double *xMax, double *yMax, double *xMin, double *yMin) {
+/*Calculate the maximum and minimum values of point clouds*/
+bool calcSize(PointCloud::Ptr &input_cloud, double *xMax, double *yMax, double *xMin, double *yMin) {
     pcl::PointXYZ minPt, maxPt;
     pcl::getMinMax3D(*input_cloud, minPt, maxPt);
-    *xMax = maxPt.x;
-    *yMax = maxPt.y;
-    *xMin = minPt.x;
-    *yMin = minPt.y;
+    if (pcl::isFinite(minPt) && pcl::isFinite(maxPt)) {
+        *xMax = maxPt.x;
+        *yMax = maxPt.y;
+        *xMin = minPt.x;
+        *yMin = minPt.y;
+        return true;
+    } else {
+        ROS_WARN("minPt,maxPt NaN or infinite value");
+        return false;
+    }
 }
 
 void filterGroundPlane(const PointCloud::Ptr &pc, PointCloud::Ptr &ground, PointCloud::Ptr &nonground) {
@@ -273,13 +337,13 @@ void filter_cloud(PointCloud::Ptr &input_cloud) {
     PointCloud::Ptr pc_ground(new pcl::PointCloud<pcl::PointXYZ>);
     PointCloud::Ptr pc_nonground(new pcl::PointCloud<pcl::PointXYZ>);
 
-    /*点云降采样，减少处理时间*/
+    /*Downsampling of point cloud */
     pcl::VoxelGrid<pcl::PointXYZ> sor;
     sor.setInputCloud(input_cloud);
     sor.setLeafSize(0.3, 0.3, 0.3);
     sor.filter(*cloud_temp);
 
-    /*将地面点云进行滤除*/
+    /*Filter out ground point clouds*/
     if (m_filterGroundPlane)
         filterGroundPlane(cloud_temp, pc_ground, pc_nonground);
 
@@ -295,16 +359,19 @@ void pub_cloud(PointCloud::Ptr &input_cloud, std::string frameId) {
 }
 
 void callback(const lio_sam::cloud_infoConstPtr &msg) {
-    ROS_INFO_STREAM("Convertor节点——接收到点云");
+    static int callback_num = 0;
+    callback_num++;
+    cout << "callback_num：" << callback_num << endl;
     pcl::fromROSMsg(msg->key_frame_cloud, *key_frame_cloud);
     pcl::fromROSMsg(msg->key_frame_poses, *key_frame_poses);
-    key_frame_cloud->header.seq = msg->header.seq;
-    key_frame_poses->header.seq = msg->header.seq;
+    int seq = msg->header.seq;
+    key_frame_cloud->header.seq = seq;
+    key_frame_poses->header.seq = seq;
     std::string baseFrameId = key_frame_cloud->header.frame_id;
 
     filter_cloud(key_frame_cloud);
 
-    /*点云转成全局坐标系*/
+    /*Convert to Global Point Cloud*/
     tf::StampedTransform baseToWorldTf, worldToBaseTf;
 
     try {
@@ -313,26 +380,45 @@ void callback(const lio_sam::cloud_infoConstPtr &msg) {
     } catch (tf::TransformException &ex) {
         ROS_DEBUG_STREAM("Transform error of baseToWorldTf: " << ex.what() << ", quitting callback");
     }
-
     Eigen::Matrix4f baseToWorld;
     pcl_ros::transformAsMatrix(baseToWorldTf, baseToWorld);
     pcl::transformPointCloud(*cloud_filterd, *world_cloud, baseToWorld);
-
     pub_cloud(world_cloud, worldFrameId);
+    bool Valid = false;
 
-    GridMap current_map;
-    /*计算点云的最大和最小值*/
-    double xMax = 0, yMax = 0, xMin = 0, yMin = 0;
-    calcSize(cloud_filterd,&xMax, &yMax, &xMin, &yMin);
-    /* 确定栅格地图的长和宽 */
-    int xCells = ((int)((xMax) / cellResolution)) + 1;
-    int yCells = ((int)((yMax - yMin) / cellResolution)) + 1;
-    cout << "地图大小：" << xCells << " " << yCells << endl;
-    current_map.SetMap(xCells, yCells, 0.0, yMin, cellResolution, baseFrameId);
-    current_map.cloud_to_grid(*cloud_filterd);
-    pub_gridmsg(current_map);
+    /* current_world_map */
+    double xMax = 0, yMax = 0, xMin = 0, yMin = 0, mapOriginPosX = 0, mapOriginPosY = 0;
+    Valid = calcSize(world_cloud, &xMax, &yMax, &xMin, &yMin);
+    if (Valid) {
+        GridMap current_world_map;
+        /* Determine the width and height of a map */
+        xMax = (xMax > 0) ? xMax : 0;
+        xMin = (xMin > 0) ? 0 : xMin;
+        yMax = (yMax > 0) ? yMax : 0;
+        yMin = (yMin > 0) ? 0 : yMin;
+        mapOriginPosX = cellResolution * (std::floor(xMin / cellResolution));
+        mapOriginPosY = cellResolution * (std::floor(yMin / cellResolution));
+        int width = ((int)((xMax - mapOriginPosX) / cellResolution)) + 1;
+        int height = ((int)((yMax - mapOriginPosY) / cellResolution)) + 1;
+        /* Determine the coordinates of the sensor */
+        tf::Vector3 origin = baseToWorldTf.getOrigin();
+        double sensorOriginPosX = origin.x();
+        double sensorOriginPosY = origin.y();
+        current_world_map.SetMap(width, height, mapOriginPosX, mapOriginPosY, cellResolution, worldFrameId, sensorOriginPosX, sensorOriginPosY, seq);
+        current_world_map.cloud_to_grid(*world_cloud);
+        // pub_gridmsg(current_world_map);
 
-    GridMap Accumulated_map;
+        /* Accumulated_map*/
+        static bool ifAssign = false;
+        static GridMap Accumulated_map;
+        if (!ifAssign) {
+            Accumulated_map = current_world_map;
+            ifAssign = true;
+        } else {
+            Accumulated_map += current_world_map;
+        }
+        pub_gridmsg(Accumulated_map);
+    }
 }
 
 int main(int argc, char **argv) {
