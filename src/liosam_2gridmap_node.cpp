@@ -392,10 +392,10 @@ void callback(const lio_sam::cloud_infoConstPtr &msg) {
     if (Valid) {
         GridMap current_world_map;
         /* Determine the width and height of a map */
-        xMax = (xMax > 0) ? xMax : 0;
-        xMin = (xMin > 0) ? 0 : xMin;
-        yMax = (yMax > 0) ? yMax : 0;
-        yMin = (yMin > 0) ? 0 : yMin;
+        // xMax = (xMax > 0) ? xMax : 0;
+        // xMin = (xMin > 0) ? 0 : xMin;
+        // yMax = (yMax > 0) ? yMax : 0;
+        // yMin = (yMin > 0) ? 0 : yMin;
         mapOriginPosX = cellResolution * (std::floor(xMin / cellResolution));
         mapOriginPosY = cellResolution * (std::floor(yMin / cellResolution));
         int width = ((int)((xMax - mapOriginPosX) / cellResolution)) + 1;
